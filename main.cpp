@@ -21,6 +21,7 @@
 #include <mod/menu-api.h>
 
 #include <stdint.h>
+#include <math.h>
 #include <time.h>
 
 // FindPlayerVehicle va declarado con DECL_FASTCALL_SIMPLE_GLO, que resuelve el
@@ -67,16 +68,9 @@ MYMOD(net.psdk.samod.selectorlauncher, SA Selector Launcher, 1.0, Jean7z)
 /* El estado de "en vehiculo" (ambar) se queda sin texto que lo explique: es lo
    que se pidio. Sigue viendose por el color de la percha y del borde inferior. */
 
-/* Fundido por inactividad: PASA UN RATO sin tocar y se atenua hasta un PISO, no
-   hasta 0. El boton no llega a desaparecer nunca, y esa es toda la garantia de
-   que siga siendo alcanzable: si se fuera a alfa 0 no habria forma de tocarlo
-   para despertarlo, y habria que inventar un rescate aparte.
-
-   El piso no es una puerta: el hit-test NO mira el alfa, asi que un icono
-   atenuado se toca igual que uno brillante. El apagado es estetica, no bloqueo. */
-#define ICO_FADE_DELAY 6000.0f  /* ms sin presion antes de empezar a apagarse */
-#define ICO_FADE_TIME   900.0f  /* ms que dura el fundido */
-#define ICO_FADE_MIN    0.38f  /* piso de opacidad */
+/* Sin fundido: la pestaña esta SIEMPRE a opacidad 1.0. No hay IconFade, ni
+   reloj de inactividad, ni piso de opacidad: el usuario pidio dejarla siempre
+   encendida. */
 
 /* Tope de espera de la sonda antes de asumir un tamano. */
 #define PROBE_TIMEOUT 1500u
@@ -131,10 +125,6 @@ static uint64_t            g_probeAt          = 0;
    se separen en ningun tamano de pantalla. */
 static float               g_tabX = 0.0f, g_tabW = 0.0f, g_tabH = 0.0f;
 
-/* Instante del ultimo toque SOBRE el lanzador. El reloj del fundido corre a
-   partir de aqui. */
-static uint64_t            g_idleAt  = 0;
-
 /* Instante del ultimo arranque con exito. Lo usa el desatasco: no se sospecha de
    un script que acaba de arrancar, porque el arranque es lento. 0 = nunca se ha
    lanzado nada, y entonces el desatasco no puede dispararse. */
@@ -164,14 +154,6 @@ static uint64_t NowMs(void)
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000u + (uint64_t)(ts.tv_nsec / 1000000);
-}
-
-/* Modula el ALFA de un color 0xRRGGBBAA. El alfa es el byte bajo, asi que se
-   cambia solo ese byte y el RGB se queda como estaba. */
-static unsigned int FadeAlpha(unsigned int c, float k)
-{
-    const unsigned int a = (unsigned int)((float)(c & 0xFFu) * k);
-    return (c & 0xFFFFFF00u) | (a & 0xFFu);
 }
 
 /* ------------------------------------------------------------------ */
@@ -415,31 +397,47 @@ static unsigned int StateColor(void)
     return C_READY;
 }
 
-/* Cuanto se ve el lanzador ahora mismo: 1.0 recien tocado, bajando hasta
-   ICO_FADE_MIN pasado ICO_FADE_DELAY sin que se toque nada.
+/* Cuarto de disco relleno, como en el music-player: el abanico del lienzo
+   triangula desde el primer vertice, asi que basta con poner el CENTRO del arco
+   delante y luego los puntos del arco. Llena el cuarto EXACTO y no se sale hacia
+   dentro, que es lo que evita que las piezas translucidas se compongan dos
+   veces. */
+#define ARC_SEGS 8
 
-   NUNCA llega a 0. Ese piso es lo que garantiza que el boton siga siendo
-   tocable: sin el habria que añadir una regla de rescate aparte, y no hace
-   falta porque el hit-test no depende del alfa. */
-static float IconFade(uint64_t now)
+static void FillQuarterDisc(float cx, float cy, float r, float a0, unsigned int c)
 {
-    float t;
-    if(now <= g_idleAt || now - g_idleAt <= (uint64_t)ICO_FADE_DELAY) return 1.0f;
-    t = (float)(now - g_idleAt - (uint64_t)ICO_FADE_DELAY) / ICO_FADE_TIME;
-    if(t > 1.0f) t = 1.0f;
-    return 1.0f - (1.0f - ICO_FADE_MIN) * t;
+    float xy[2 * (ARC_SEGS + 2)];
+    int i, n = 0;
+
+    xy[0] = cx; xy[1] = cy; n = 1;                       /* centro: ancla del fan */
+    for(i = 0; i <= ARC_SEGS; ++i)
+    {
+        const float a = a0 + (float)i * (3.14159265f * 0.5f / (float)ARC_SEGS);
+        xy[n * 2]     = cx + r * cosf(a);
+        xy[n * 2 + 1] = cy + r * sinf(a);
+        ++n;
+    }
+    g_menuKit->DrawPoly(xy, n, c, 1, 1);
 }
 
-/* Percha: glifo de ropa, no de audio, porque esto abre un armario. Gancho en
-   arco (DrawCircle sin relleno), viga, dos cuestas diagonales y barra
-   horizontal. Cinco llamadas baratas: corre cada frame en el hilo del juego. */
+/* Percha: glifo de ropa, no de audio, porque esto abre un armario.
+
+   El gancho es un punto RELLENO, no un arco. Dos motivos:
+     - este canvas no dibuja arcos: DrawCircle(filled=0) traza los 360 grados,
+       y el cierre se veia como un pacman dentro del icono. Un arco de verdad
+       habria que hacerlo con DrawPoly abierto, y a este tamano (radio ~3-4 px)
+       se lee como ruido, no como gancho.
+     - un circulo relleno es convexo y no deja costura, mientras que una
+       polilinea abierta fina a 4 px se rompe al cambiar de escala.
+   La percha se reconoce por el triangulo (cuestas + barra) y el punto le da el
+   remate de arriba; con eso basta. */
 static void DrawHangerGlyph(float cx, float cy, float r, unsigned int c)
 {
     const float barY  = cy + r * 0.46f;
     const float halfW = r * 0.82f;
     const float peakY = cy - r * 0.32f;
 
-    g_menuKit->DrawCircle(cx, cy - r * 0.82f, r * 0.24f, c, 0, 12);   /* gancho */
+    g_menuKit->DrawCircle(cx, cy - r * 0.82f, r * 0.24f, c, 1, 10);   /* gancho */
     g_menuKit->DrawLine(cx, cy - r * 0.58f, cx, peakY, c, 1.0f);      /* viga */
     g_menuKit->DrawLine(cx, peakY, cx - halfW, barY, c, 1.0f);        /* cuestas */
     g_menuKit->DrawLine(cx, peakY, cx + halfW, barY, c, 1.0f);
@@ -447,44 +445,44 @@ static void DrawHangerGlyph(float cx, float cy, float r, unsigned int c)
 }
 
 /* Pestaña del borde superior: rectangulo con las esquinas de ABAJO redondeadas y
-   las de arriba rectas, que se pierden contra el borde. Cuatro primitivas y sin
-   ningun poligono raro:
+   las de arriba rectas, que se pierden contra el borde.
 
-     - el rectangulo central, de y = 0 hasta h - r
-     - dos circulos rellenos en las esquinas inferiores, que son el redondeo
-     - un rectangulo fino que cierra el hueco central que dejan esos circulos
+   Las piezas NO se solapan, igual que en FillRoundRect del music-player. Antes se
+   usaban circulos ENTEROS para el redondeo y se comian parte del rectangulo y
+   del relleno central; con un cuerpo translucido eso compone el alfa dos veces y
+   salen manchas oscuras. Ahora el redondeo son dos cuartos de disco, que se
+   quedan dentro de su cuadrado de esquina y justos contra el rectangulo.
 
    Sin escalado al pulsar: pegada al borde no hay referencia para encogerla, y el
    escalado de un disco flotando no tiene sentido aqui. El toque solo aclara el
    color de la percha. */
-static void DrawTab(uint64_t now)
+static void DrawTab(void)
 {
     const float cx = g_tabX;
     const float w  = g_tabW;
     const float h  = g_tabH;
     const float r  = h * TAB_CORNER_K;
-    const float k  = IconFade(now);
+    const float PI_2 = 3.14159265f * 0.5f;
+    const float x0 = cx - w * 0.5f;
+    const float x1 = cx + w * 0.5f;
     const unsigned int st = StateColor();
-    const unsigned int body = FadeAlpha(L_BODY, k);
-    const unsigned int edge = FadeAlpha(st, k);
 
-    g_menuKit->DrawRect(cx - w * 0.5f, 0.0f, w, h - r, body, 1);
-    g_menuKit->DrawCircle(cx - w * 0.5f + r, h - r, r, body, 1, 12);
-    g_menuKit->DrawCircle(cx + w * 0.5f - r, h - r, r, body, 1, 12);
-    /* Cierra el hueco central entre los dos circulos. */
-    g_menuKit->DrawRect(cx - w * 0.5f + r, h - r, w - r * 2.0f, r, body, 1);
+    /* Cuerpo: rectangulo hasta h - r y los dos cuartos inferiores. Alpha 1.0
+       siempre, sin fundido: la pestaña esta siempre encendida. */
+    g_menuKit->DrawRect(x0, 0.0f, w, h - r, L_BODY, 1);
+    FillQuarterDisc(x0 + r, h - r, r, PI_2,       L_BODY);   /* esquina inf izq */
+    FillQuarterDisc(x1 - r, h - r, r, 0.0f,       L_BODY);   /* esquina inf der */
+    g_menuKit->DrawRect(x0 + r, h - r, w - r * 2.0f, r, L_BODY, 1);
 
     /* Una sola capa tenue bajo la pestaña, del color de estado. El halo de tres
-       aros del disco no se traslada aqui: en algo tan pequeno solo quedaria
+       aros del disco no se traslada aqui: en algo tan pequeño solo quedaría
        sucio. Con esta linea basta para insinuar el estado sin texto. */
-    g_menuKit->DrawRect(cx - w * 0.5f + r * 0.5f, h, w - r, 1.5f,
-                        FadeAlpha((st & 0xFFFFFF00u) | 0x80u, k), 1);
+    g_menuKit->DrawRect(x0 + r * 0.5f, h, w - r, 1.5f,
+                        (st & 0xFFFFFF00u) | 0x80u, 1);
 
-    /* Percha dentro, al TAB_GLYPH_K del alto. El gancho se conserva: a 20-34 px
-       de alto el triangulo de la percha ya se lee, y el gancho le da la forma
-       que la identifica como armario. */
-    DrawHangerGlyph(cx, h * 0.5f, h * TAB_GLYPH_K,
-                    FadeAlpha(g_press ? L_PRESS : st, k));
+    /* Percha dentro, al TAB_GLYPH_K del alto. El triangulo ya se lee y el punto
+       de arriba le da la forma que la identifica como armario. */
+    DrawHangerGlyph(cx, h * 0.5f, h * TAB_GLYPH_K, g_press ? L_PRESS : st);
 }
 
 /* ------------------------------------------------------------------ */
@@ -547,8 +545,6 @@ static void HandleInput(uint64_t now, bool visible)
 
     if(down && !g_wasDown && id)
     {
-        /* Cualquier toque sobre nuestra UI reinicia el fundido. */
-        g_idleAt = now;
         LaunchSelector();
     }
 
@@ -589,17 +585,15 @@ static void OnTick(void*)
     LayoutTab();
     HandleInput(now, visible);
 
-    /* Al volver a verse, el reloj del fundido se rearma: si no, el icono
-       reapareceria a media tinta justo cuando el usuario lo está buscando. */
+    /* Al volver a verse se suelta el resaltado: si no, se quedaria con el
+       glifo aclarado de un toque anterior. Sin fundido ya no hay nada mas que
+       rearmar. */
     if(visible && !g_wasVisible)
-    {
-        g_idleAt = now;
-        g_press  = false;
-    }
+        g_press = false;
     g_wasVisible = visible;
 
     if(visible)
-        DrawTab(now);
+        DrawTab();
 }
 
 ON_MOD_LOAD()
