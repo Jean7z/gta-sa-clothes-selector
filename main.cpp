@@ -30,18 +30,19 @@
 
 MYMOD(net.psdk.samod.selectorlauncher, SA Selector Launcher, 1.0, Jean7z)
 
-/* CTheScripts::StartNewScript(unsigned char const*) -> int.
+/* CTheScripts::StartNewScript(unsigned char const*)
  *
  * Itanium mangled name: _ZN11CTheScripts14StartNewScriptEPh
  *
- * The return value is deliberately declared void: the ARM64 ABI makes ignoring
- * a real int return safe, and the script slot's identity is not something we
- * want to depend on. Note this is the single-argument overload; the two-argument
- * `...EPht` overload is a different symbol and is not used.
+ * The return type does not appear in the mangled name. The function actually
+ * returns the CRunningScript* it just created (mov x0, x19 before ret), which is
+ * required: StartNewScript does NOT fully initialise the script (see OnRelease).
  *
- * StartNewScript copies the bytecode into a CRunningScript-owned buffer, so
- * pointing it at the static const array below is safe. */
-typedef void (*StartNewScript_t)(const uint8_t*);
+ * Note this is the single-argument overload. The two-argument `...EPht` variant
+ * is a different symbol, used for reloading an existing script slot, and has
+ * the same initialisation behaviour.
+ */
+typedef CRunningScript* (*StartNewScript_t)(const uint8_t*);
 
 static StartNewScript_t    g_pStartNewScript  = NULL;
 static const MenuKitAPI*   g_menuKit          = NULL;
@@ -108,9 +109,49 @@ static void OnRelease(void*)
         return;
     }
 
-    g_pStartNewScript(SELECTOR_SCRIPT);
+    CRunningScript* script = g_pStartNewScript(SELECTOR_SCRIPT);
+    if(!script)
+    {
+        logger->Error("CTheScripts::StartNewScript returned NULL; selector script not started");
+        return;
+    }
 
-    logger->Info("Selector script started (CTheScripts::StartNewScript, %u bytes)", SELECTOR_SCRIPT_LEN);
+    /* Set the script base pointer, which StartNewScript leaves NULL.
+     *
+     * StartNewScript does `memset(&script + 0x18, 0, 0x52)` and then writes only
+     * m_pCurrentIP (0x20) = our buffer. It never sets m_pBaseIP (0x18), and
+     * neither does CRunningScript::Init(). Scripts inside main.scm get their base
+     * from the scheduler when the game loads them, so the game never needed to
+     * do it here -- but this is the path for an externally supplied buffer.
+     *
+     * The vanilla jump handler requires it. In
+     * CRunningScript::ProcessCommands0To99, the shared jump path at 0x3f4cec:
+     *
+     *     ldrsw x8, [x8]              ; x8 = sign-extended operand
+     *     tbnz  w8, #0x1f, negative    ; sign selects the base
+     *     ...  add  x8, x9, x8         ; operand >= 0: &CTheScripts::ScriptSpace + op
+     *     ...  sub  x8, x9, x8         ; operand <  0: m_pBaseIP - op  == base + |op|
+     *     str  x8, [x19, #0x20]       ; m_pCurrentIP = result
+     *
+     * A NEGATIVE operand is therefore not corrupt -- it is the selector for the
+     * script-base-relative path, and |operand| is the absolute file offset. Every
+     * jump in this .csi is negative for exactly that reason.
+     *
+     * With m_pBaseIP == NULL the first instruction (GOTO, operand -15) computes
+     * 0 - (-15) == 15 == 0xF, and the VM segfaults fetching the next opcode at
+     * 0xF. Setting the base makes it SELECTOR_SCRIPT + 15 == +0x0F, which is the
+     * first real instruction, past the `03A4 SCRIPT_NAME "HAF"` header.
+     *
+     * Offset 0x18 is not guessed. The game ships DWARF for this exact member:
+     *   BaseAddressOfThisScript, type `UInt8 *`, script.h:417
+     * which is the member named m_pBaseIP here. CHECKSIZE(CRunningScript, 0x100,
+     * 0x130) pins the arm64 layout against the game's own DWARF byte size.
+     *
+     * Done in the same call as StartNewScript, before returning to the game loop,
+     * so the scheduler cannot observe the script with a NULL base. */
+    script->m_pBaseIP = (unsigned char*)SELECTOR_SCRIPT;
+
+    logger->Info("Selector script started (CTheScripts::StartNewScript, %u bytes, base set)", SELECTOR_SCRIPT_LEN);
 }
 
 /* Returns true when the player is currently driving. */
