@@ -21,8 +21,6 @@
 #include <mod/menu-api.h>
 
 #include <stdint.h>
-#include <math.h>
-#include <string.h>
 #include <time.h>
 
 // FindPlayerVehicle va declarado con DECL_FASTCALL_SIMPLE_GLO, que resuelve el
@@ -41,32 +39,33 @@ MYMOD(net.psdk.samod.selectorlauncher, SA Selector Launcher, 1.0, Jean7z)
 /* Lanzador. Abajo a la DERECHA: abajo-izquierda esta el radar y estorba. El
    margen y el radio se calculan en tiempo real desde el tamano medido del
    render, nunca como constantes, porque cada dispositivo tiene el suyo. */
-/* Lanzador. Centrado en horizontal y PEGADO ABAJO. Abajo-izquierda esta el
-   radar y abajo-derecha los controles tactiles, asi que el centro-abajo es el
-   hueco que queda. El margen y el radio salen del tamano medido del render en
-   cada frame, nunca de una constante. */
-#define LAUNCH_MARGIN  28.0f    /* margen respecto al borde inferior */
-#define LAUNCH_R_MIN   34.0f    /* radio minimo, en pantallas pequenas */
-#define LAUNCH_R_MAX   40.0f    /* radio maximo, en pantallas grandes */
-#define LAUNCH_R_K     0.052f   /* radio = min(screenW,screenH) * esto, acotado */
+/* Pestaña "uñita": pegada al BORDE SUPERIOR, centrada en horizontal, colgando
+   hacia dentro como un marcador. El borde superior en y = 0 sin margen, para que
+   se lea como parte de la pantalla y no como un boton puesto encima.
 
-/* Lo que toca es un dedo y no un raton, asi que el acierto se ensancha. */
-#define BTN_TOUCH_PAD  10.0f
+   Proporciones sale del lado corto medido y se acotan, para que en un movil
+   pequeno siga siendo pulsable y en una tablet no quede enorme. */
+#define TAB_W_K       0.11f    /* ancho = min(screenW,screenH) * esto */
+#define TAB_W_MIN    44.0f     /* ancho minimo */
+#define TAB_W_MAX    72.0f     /* ancho maximo */
+#define TAB_H_K       0.5f     /* alto = ancho * esto */
+#define TAB_H_MIN    20.0f     /* alto minimo */
+#define TAB_H_MAX    34.0f     /* alto maximo */
 
-/* Cuanto se encoge el disco al pulsarlo y con que rapidez vuelve: el valor
-   persigue al destino cada frame en vez de saltar. */
-#define PRESS_SCALE  0.94f
-#define PRESS_EASE   0.25f
+/* Radio de las esquinas INFERIORES. Las superiores van rectas a proposito: se
+   pierden contra el borde de la pantalla, que es justo lo que se busca. */
+#define TAB_CORNER_K  0.45f    /* radio = alto * esto */
 
-/* Respiracion en reposo: seno lentisimo sobre el alfa del halo. La amplitud es
-   pequena a proposito, para que se note vivo sin robarle sitio a la partida. */
-#define BREATHE_AMP  0.10f
-#define BREATHE_MS   6000.0f
+/* Glifo: la percha ocupa esto del alto de la pestaña. */
+#define TAB_GLYPH_K   0.45f
 
-/* Texto de estado, centrado respecto al boton y NUNCA encima del disco. */
-#define HINT_SCALE    2
-#define HINT_GAP     16.0f    /* separacion entre el borde del disco y el texto */
-#define HINT_MARGIN   8.0f    /* margen minimo del texto contra el borde */
+/* Holgura del golpeo por DEBAJO de la pestaña. Una pestaña diminuta es un blanco
+   pequeño, y un dedo no apunta con precisión: el area sensible se extiende hacia
+   abajo sin salirse del ancho dibujado. */
+#define TAB_TOUCH_EXTEND 30.0f
+
+/* El estado de "en vehiculo" (ambar) se queda sin texto que lo explique: es lo
+   que se pidio. Sigue viendose por el color de la percha y del borde inferior. */
 
 /* Fundido por inactividad: PASA UN RATO sin tocar y se atenua hasta un PISO, no
    hasta 0. El boton no llega a desaparecer nunca, y esa es toda la garantia de
@@ -127,14 +126,10 @@ static float               g_screenW          = 0.0f;
 static float               g_screenH          = 0.0f;
 static uint64_t            g_probeAt          = 0;
 
-/* Geometria del frame actual (la escribe LayoutLauncher). El hit-test necesita
-   las coordenadas y el radio igual que el dibujo, y ambos salen de aqui, para
-   que en una pantalla grande no se dibujen grande y se toquen pequeno. */
-static float               g_launchX = 0.0f, g_launchY = 0.0f, g_launchR = 0.0f;
-
-/* Escala del disco, 1.0 en reposo y PRESS_SCALE mientras se pulsa. Persigue al
-   destino cada frame: por eso hace falta GUARDARLA entre frames. */
-static float               g_pressK = 1.0f;
+/* Geometria de la pestana del frame actual (la escribe LayoutTab). El hit-test
+   usa las MISMAS variables que el dibujo, para que el toque y lo que se ve no
+   se separen en ningun tamano de pantalla. */
+static float               g_tabX = 0.0f, g_tabW = 0.0f, g_tabH = 0.0f;
 
 /* Instante del ultimo toque SOBRE el lanzador. El reloj del fundido corre a
    partir de aqui. */
@@ -373,39 +368,40 @@ static void ProbeScreen(void)
 /* Layout, hit-test y dibujo                                           */
 /* ------------------------------------------------------------------ */
 
-/* Radio del disco, escalado por el lado corto de la pantalla y acotado para que
-   ni se pierda en un movil pequeno ni se tragase el juego en una tablet. */
-static float LaunchRadius(void)
+/* Tamano de la pestaña: lado corto de la pantalla, acotado para que ni se pierda
+   en un movil pequeno ni quede enorme en una tablet. */
+static void TabSize(void)
 {
     const float side = g_screenW < g_screenH ? g_screenW : g_screenH;
-    float r = side * LAUNCH_R_K;
-    if(r < LAUNCH_R_MIN) r = LAUNCH_R_MIN;
-    if(r > LAUNCH_R_MAX) r = LAUNCH_R_MAX;
-    return r;
+    g_tabW = side * TAB_W_K;
+    if(g_tabW < TAB_W_MIN) g_tabW = TAB_W_MIN;
+    if(g_tabW > TAB_W_MAX) g_tabW = TAB_W_MAX;
+
+    g_tabH = g_tabW * TAB_H_K;
+    if(g_tabH < TAB_H_MIN) g_tabH = TAB_H_MIN;
+    if(g_tabH > TAB_H_MAX) g_tabH = TAB_H_MAX;
+
+    g_tabX = g_screenW * 0.5f;
 }
 
-/* Centro-abajo: centrado en horizontal, pegado al borde inferior con el margen.
-   Se recalcula cada frame con el tamano medido por la sonda, nunca con un valor
-   fijo, para que en otra pantalla el boton caiga en el mismo sitio relativo.
-
-   Baja tambien saca el lanzador de encima de los menus de tienda del propio
-   script, que se abren en el centro. */
-static void LayoutLauncher(void)
+/* Pestaña del borde superior, centrada. Se recalcula cada frame con el tamano
+   medido por la sonda, nunca con un valor fijo. */
+static void LayoutTab(void)
 {
-    g_launchR = LaunchRadius();
-    g_launchX = g_screenW * 0.5f;
-    g_launchY = g_screenH - LAUNCH_MARGIN - g_launchR;
+    TabSize();
 }
 
-/* Un rectangulo de toque alrededor del centro. Cuadrado y no circulo porque es
-   lo que espera un dedo, y con BTN_TOUCH_PAD de margen el acierto no exige
-   punteria. Usa g_launchR, el MISMO radio que dibuja el disco, asi que en
-   cualquier tamano de pantalla el toque y el dibujo no se separan. */
+/* Golpeo: MISMO ancho y MISMA X que el dibujo, desde y = 0 hasta el alto de la
+   pestaña mas una holgura generosa POR DEBAJO. Una pestaña diminuta es un blanco
+   pequeño y un dedo no apunta con precisión, asi que el area sensible baja mas
+   de lo que se ve, sin salirse del ancho dibujado.
+
+   El hit-test no mira el alfa: con el icono atenuado se toca igual. */
 static bool HitTest(float px, float py)
 {
-    const float r = g_launchR + BTN_TOUCH_PAD;
-    return px >= g_launchX - r && px <= g_launchX + r &&
-           py >= g_launchY - r && py <= g_launchY + r;
+    const float halfW = g_tabW * 0.5f;
+    return px >= g_tabX - halfW && px <= g_tabX + halfW &&
+           py >= 0.0f && py <= g_tabH + TAB_TOUCH_EXTEND;
 }
 
 /* Color de estado. Son los mismos dos que usan las frases de abajo, para que el
@@ -450,81 +446,45 @@ static void DrawHangerGlyph(float cx, float cy, float r, unsigned int c)
     g_menuKit->DrawLine(cx - halfW, barY, cx + halfW, barY, c, 1.0f);  /* barra */
 }
 
-/* Lanzador: disco translucido en el centro de la pantalla, con halo y anillo del
-   color de estado. */
-static void DrawLauncher(uint64_t now)
+/* Pestaña del borde superior: rectangulo con las esquinas de ABAJO redondeadas y
+   las de arriba rectas, que se pierden contra el borde. Cuatro primitivas y sin
+   ningun poligono raro:
+
+     - el rectangulo central, de y = 0 hasta h - r
+     - dos circulos rellenos en las esquinas inferiores, que son el redondeo
+     - un rectangulo fino que cierra el hueco central que dejan esos circulos
+
+   Sin escalado al pulsar: pegada al borde no hay referencia para encogerla, y el
+   escalado de un disco flotando no tiene sentido aqui. El toque solo aclara el
+   color de la percha. */
+static void DrawTab(uint64_t now)
 {
-    const float cx = g_launchX, cy = g_launchY;
+    const float cx = g_tabX;
+    const float w  = g_tabW;
+    const float h  = g_tabH;
+    const float r  = h * TAB_CORNER_K;
+    const float k  = IconFade(now);
     const unsigned int st = StateColor();
-    const float k = IconFade(now);          /* fundido por inactividad */
-    const float br = 1.0f + BREATHE_AMP *
-              sinf((float)(now % (uint64_t)BREATHE_MS) * (6.2831853f / BREATHE_MS));
-    unsigned int a;
-    float r;
-    int i;
+    const unsigned int body = FadeAlpha(L_BODY, k);
+    const unsigned int edge = FadeAlpha(st, k);
 
-    /* Recuperacion suave del pulsado: el valor se guarda y se acerca al destino
-       en vez de saltar de golpe. */
-    g_pressK += ((g_press ? PRESS_SCALE : 1.0f) - g_pressK) * PRESS_EASE;
-    r = g_launchR * g_pressK;
+    g_menuKit->DrawRect(cx - w * 0.5f, 0.0f, w, h - r, body, 1);
+    g_menuKit->DrawCircle(cx - w * 0.5f + r, h - r, r, body, 1, 12);
+    g_menuKit->DrawCircle(cx + w * 0.5f - r, h - r, r, body, 1, 12);
+    /* Cierra el hueco central entre los dos circulos. */
+    g_menuKit->DrawRect(cx - w * 0.5f + r, h - r, w - r * 2.0f, r, body, 1);
 
-    /* Halo: tres discos concentricos RELLENOS con alfa decreciente y respirando
-       despacio. Este API no tiene desenfoque, asi que el halo se simula apilando
-       aros. Se dibujan ANTES del cuerpo para que este los tape por dentro. */
-    for(i = 0; i < 3; ++i)
-    {
-        const float hr = r + 3.0f + (float)i * 3.0f;
-        const unsigned int base = (unsigned int)(0x16u * br);
-        a = (st & 0xFFFFFF00u) |
-            (unsigned int)((base * (unsigned int)(3 - i)) / 3u) & 0xFFu;
-        g_menuKit->DrawCircle(cx, cy, hr, FadeAlpha(a, k), 1, 32);
-    }
+    /* Una sola capa tenue bajo la pestaña, del color de estado. El halo de tres
+       aros del disco no se traslada aqui: en algo tan pequeno solo quedaria
+       sucio. Con esta linea basta para insinuar el estado sin texto. */
+    g_menuKit->DrawRect(cx - w * 0.5f + r * 0.5f, h, w - r, 1.5f,
+                        FadeAlpha((st & 0xFFFFFF00u) | 0x80u, k), 1);
 
-    /* Cuerpo: negro azulado translucido. Se ve el juego por detras. */
-    g_menuKit->DrawCircle(cx, cy, r, FadeAlpha(L_BODY, k), 1, 40);
-    /* Anillo: acento fino, y es lo que dice en que estado estamos. */
-    g_menuKit->DrawCircle(cx, cy, r - 0.5f, FadeAlpha(st, k), 0, 40);
-
-    /* Glifo: blanco mientras se pulsa, del color de estado si no. */
-    DrawHangerGlyph(cx, cy, r * 0.55f, FadeAlpha(g_press ? L_PRESS : st, k));
-}
-
-/* Texto de estado, centrado respecto al boton y por ENCIMA de el: nunca se
-   superpone al disco. Se atenua con el MISMO factor que el disco, para que se
-   vayan y vuelvan juntos. */
-static void DrawHint(uint64_t now)
-{
-    const char* msg;
-    unsigned int color;
-    float w, x;
-
-    /* El script comprueba si el jugador conducia y PARA en cuanto se mete en un
-       vehiculo, asi que conducir es justo el estado en el que NO puede correr.
-       Se enseña ese requisito como pista para que el boton no parezca muerto.
-
-       Solo dos estados: con el script en marcha el lanzador esta escondido y no
-       hay nada que señalar, asi que "SELECTOR RUNNING" sobra. */
-    if(IsInVehicle())
-    {
-        msg   = "STEP OUT OF VEHICLE TO RUN";
-        color = C_VEHICLE;
-    }
-    else
-    {
-        msg   = "PRESS SELECTOR";
-        color = C_READY;
-    }
-
-    /* El avance de la fuente 5x7 es 6 * escala. Centrado sobre el boton y luego
-       CORTADO contra los bordes, por si el texto se sale de la pantalla. */
-    w = (float)strlen(msg) * 6.0f * HINT_SCALE;
-    x = g_launchX - w * 0.5f;
-    if(x < HINT_MARGIN) x = HINT_MARGIN;
-    if(x + w > g_screenW - HINT_MARGIN) x = g_screenW - HINT_MARGIN - w;
-
-    g_menuKit->DrawText(x,
-                        g_launchY - g_launchR * g_pressK - HINT_GAP - 7.0f * HINT_SCALE,
-                        msg, HINT_SCALE, FadeAlpha(color, IconFade(now)));
+    /* Percha dentro, al TAB_GLYPH_K del alto. El gancho se conserva: a 20-34 px
+       de alto el triangulo de la percha ya se lee, y el gancho le da la forma
+       que la identifica como armario. */
+    DrawHangerGlyph(cx, h * 0.5f, h * TAB_GLYPH_K,
+                    FadeAlpha(g_press ? L_PRESS : st, k));
 }
 
 /* ------------------------------------------------------------------ */
@@ -626,7 +586,7 @@ static void OnTick(void*)
        regreso. El desatasco puede devolverlo si el script se queda colgado. */
     visible = SelectorVisible(now);
 
-    LayoutLauncher();
+    LayoutTab();
     HandleInput(now, visible);
 
     /* Al volver a verse, el reloj del fundido se rearma: si no, el icono
@@ -639,10 +599,7 @@ static void OnTick(void*)
     g_wasVisible = visible;
 
     if(visible)
-    {
-        DrawLauncher(now);
-        DrawHint(now);
-    }
+        DrawTab(now);
 }
 
 ON_MOD_LOAD()
