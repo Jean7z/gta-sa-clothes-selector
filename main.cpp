@@ -41,7 +41,6 @@ MYMOD(net.psdk.samod.selectorlauncher, SA Selector Launcher, 1.0, Jean7z)
 /* Lanzador. Abajo a la DERECHA: abajo-izquierda esta el radar y estorba. El
    margen y el radio se calculan en tiempo real desde el tamano medido del
    render, nunca como constantes, porque cada dispositivo tiene el suyo. */
-#define LAUNCH_MARGIN  24.0f    /* margen respecto a los bordes */
 #define LAUNCH_R_MIN   34.0f    /* radio minimo, en pantallas pequenas */
 #define LAUNCH_R_MAX   40.0f    /* radio maximo, en pantallas grandes */
 #define LAUNCH_R_K     0.052f   /* radio = min(screenW,screenH) * esto, acotado */
@@ -64,12 +63,16 @@ MYMOD(net.psdk.samod.selectorlauncher, SA Selector Launcher, 1.0, Jean7z)
 #define HINT_GAP     16.0f    /* separacion entre el borde del disco y el texto */
 #define HINT_MARGIN   8.0f    /* margen minimo del texto contra el borde */
 
-/* Fundido por inactividad: el icono se atenua hasta un piso, para que se note
-   que sigue ahi sin robar sitio a la partida, pero sin desaparecer (si
-   desaparece no se sabria donde tocar para despertarlo). */
-#define FADE_DELAY   8000.0f    /* ms sin pulsar antes de empezar a apagarse */
-#define FADE_TIME     900.0f    /* ms que dura el fundido */
-#define FADE_MIN      0.45f     /* piso de opacidad */
+/* Fundido por inactividad: PASA UN RATO sin tocar y se atenua hasta un PISO, no
+   hasta 0. El boton no llega a desaparecer nunca, y esa es toda la garantia de
+   que siga siendo alcanzable: si se fuera a alfa 0 no habria forma de tocarlo
+   para despertarlo, y habria que inventar un rescate aparte.
+
+   El piso no es una puerta: el hit-test NO mira el alfa, asi que un icono
+   atenuado se toca igual que uno brillante. El apagado es estetica, no bloqueo. */
+#define ICO_FADE_DELAY 6000.0f  /* ms sin presion antes de empezar a apagarse */
+#define ICO_FADE_TIME   900.0f  /* ms que dura el fundido */
+#define ICO_FADE_MIN    0.38f  /* piso de opacidad */
 
 /* Tope de espera de la sonda antes de asumir un tamano. */
 #define PROBE_TIMEOUT 1500u
@@ -115,12 +118,15 @@ static float               g_launchX = 0.0f, g_launchY = 0.0f, g_launchR = 0.0f;
    destino cada frame: por eso hace falta GUARDARLA entre frames. */
 static float               g_pressK = 1.0f;
 
+/* Instante del ultimo toque SOBRE el lanzador. El reloj del fundido corre a
+   partir de aqui. */
+static uint64_t            g_idleAt  = 0;
+
 /* Flanco del dedo: sin el estado ANTERIOR, un dedo que se queda apoyado sobre
    el icono lo pulsaria en cada frame. */
 static bool                g_wasDown = false;
 static bool                g_press   = false;
 static uint64_t            g_tickPrev = 0;
-static uint64_t            g_pressAt  = 0;   /* ultimo toque: arranca el fundido */
 
 static uint64_t NowMs(void)
 {
@@ -302,13 +308,17 @@ static float LaunchRadius(void)
     return r;
 }
 
-/* Abajo a la derecha, con el margen tamano en mano. Abajo-izquierda esta el
-   radar, asi que ahi no se puede poner nada. */
+/* Centro exacto de la pantalla. Se recalcula cada frame con el tamano medido por
+   la sonda, nunca con un valor fijo.
+
+   Choca a proposito con los menus de tienda del propio script, que tambien
+   aparecen en el centro; por eso el lanzador se va a alfa 0 pasado un rato sin
+   toques, y vuelve con el primero que haya en cualquier parte de la pantalla. */
 static void LayoutLauncher(void)
 {
     g_launchR = LaunchRadius();
-    g_launchX = g_screenW - LAUNCH_MARGIN - g_launchR;
-    g_launchY = g_screenH - LAUNCH_MARGIN - g_launchR;
+    g_launchX = g_screenW * 0.5f;
+    g_launchY = g_screenH * 0.5f;
 }
 
 /* Un rectangulo de toque alrededor del centro. Cuadrado y no circulo porque es
@@ -332,14 +342,18 @@ static unsigned int StateColor(void)
 }
 
 /* Cuanto se ve el lanzador ahora mismo: 1.0 recien tocado, bajando hasta
-   FADE_MIN pasado FADE_DELAY sin que se toque nada. */
+   ICO_FADE_MIN pasado ICO_FADE_DELAY sin que se toque nada.
+
+   NUNCA llega a 0. Ese piso es lo que garantiza que el boton siga siendo
+   tocable: sin el habria que añadir una regla de rescate aparte, y no hace
+   falta porque el hit-test no depende del alfa. */
 static float IconFade(uint64_t now)
 {
     float t;
-    if(now <= g_pressAt || now - g_pressAt <= (uint64_t)FADE_DELAY) return 1.0f;
-    t = (float)(now - g_pressAt - (uint64_t)FADE_DELAY) / FADE_TIME;
+    if(now <= g_idleAt || now - g_idleAt <= (uint64_t)ICO_FADE_DELAY) return 1.0f;
+    t = (float)(now - g_idleAt - (uint64_t)ICO_FADE_DELAY) / ICO_FADE_TIME;
     if(t > 1.0f) t = 1.0f;
-    return 1.0f - (1.0f - FADE_MIN) * t;
+    return 1.0f - (1.0f - ICO_FADE_MIN) * t;
 }
 
 /* Percha: glifo de ropa, no de audio, porque esto abre un armario. Gancho en
@@ -358,8 +372,8 @@ static void DrawHangerGlyph(float cx, float cy, float r, unsigned int c)
     g_menuKit->DrawLine(cx - halfW, barY, cx + halfW, barY, c, 1.0f);  /* barra */
 }
 
-/* Lanzador: disco translucido abajo a la derecha, con halo y anillo del color de
-   estado. */
+/* Lanzador: disco translucido en el centro de la pantalla, con halo y anillo del
+   color de estado. */
 static void DrawLauncher(uint64_t now)
 {
     const float cx = g_launchX, cy = g_launchY;
@@ -385,7 +399,7 @@ static void DrawLauncher(uint64_t now)
         const unsigned int base = (unsigned int)(0x16u * br);
         a = (st & 0xFFFFFF00u) |
             (unsigned int)((base * (unsigned int)(3 - i)) / 3u) & 0xFFu;
-        g_menuKit->DrawCircle(cx, cy, hr, a, 1, 32);
+        g_menuKit->DrawCircle(cx, cy, hr, FadeAlpha(a, k), 1, 32);
     }
 
     /* Cuerpo: negro azulado translucido. Se ve el juego por detras. */
@@ -397,10 +411,10 @@ static void DrawLauncher(uint64_t now)
     DrawHangerGlyph(cx, cy, r * 0.55f, FadeAlpha(g_press ? L_PRESS : st, k));
 }
 
-/* Texto de estado, centrado respecto al boton y por ENCIMA de el: abajo solo
-   queda el margen de 24 px y la frase se saldria de la pantalla. Nunca se
-   superpone al disco. */
-static void DrawHint(void)
+/* Texto de estado, centrado respecto al boton y por ENCIMA de el: nunca se
+   superpone al disco. Se atenua con el MISMO factor que el disco, para que se
+   vayan y vuelvan juntos. */
+static void DrawHint(uint64_t now)
 {
     const char* msg;
     unsigned int color;
@@ -426,8 +440,7 @@ static void DrawHint(void)
     }
 
     /* El avance de la fuente 5x7 es 6 * escala. Centrado sobre el boton y luego
-       CORTADO contra los bordes: con el boton pegado a la derecha, el texto
-       centrado se salia por la derecha, y la frase mas larga no cabria. */
+       CORTADO contra los bordes, por si el texto se sale de la pantalla. */
     w = (float)strlen(msg) * 6.0f * HINT_SCALE;
     x = g_launchX - w * 0.5f;
     if(x < HINT_MARGIN) x = HINT_MARGIN;
@@ -435,42 +448,63 @@ static void DrawHint(void)
 
     g_menuKit->DrawText(x,
                         g_launchY - g_launchR * g_pressK - HINT_GAP - 7.0f * HINT_SCALE,
-                        msg, HINT_SCALE, color);
+                        msg, HINT_SCALE, FadeAlpha(color, IconFade(now)));
 }
 
 /* ------------------------------------------------------------------ */
 /* Entrada y tick                                                      */
 /* ------------------------------------------------------------------ */
 
-/* Hit-test y accion. El flanco lo da el estado ANTERIOR del puntero. */
+/* Entrada y accion.
+
+   El hit-test NO mira el alfa: el icono atenuado se toca igual que el brillante.
+   Un toque abre siempre, este o no apagado, porque pedir dos golpes para lo
+   mismo es engorroso. El apagado es estetica, no una puerta. Y como el piso es
+   0.38 y no 0, nunca hay un boton invisible al que no se pueda llegar. */
 static void HandleInput(uint64_t now)
 {
     float px = 0.0f, py = 0.0f;
-    int down = 0;
+    int down = 0, id = 0;
 
-    if(!g_menuKit->GetPointer(&px, &py, &down))
+    if(!g_menuKit->GetPointer(&px, &py, &down)) { g_wasDown = down; g_press = false; return; }
+
+    /* Con el menu del juego abierto el dedo es suyo, no nuestro. El raw touch
+       sigue llegando aqui mientras el mapa esta abierto, asi que sin esta puerta
+       el toque con el que se cierra el mapa se lee como un tap en nuestro icono
+       y nos abre el selector. GetMenuUp lee la pila de screens del propio juego,
+       asi que es su definicion de "ocupado", no una heuristica.
+
+       Salimos sin interpretar nada y resincronizamos el flanco con el estado
+       real del dedo, para que el toque de cierre no quede pendiente. */
+    if(g_menuKit->GetMenuUp && g_menuKit->GetMenuUp() == 1)
     {
         g_wasDown = down;
         g_press = false;
+        g_tickPrev = now;
         return;
     }
 
-    /* El menu abierto ya lo ha filtrado OnTick antes de llegar aqui; aqui solo
-       queda el respaldo para un framework viejo que no exponga GetMenuUp (-1):
-       si el pump dejo de correr, el juego abrio su propia UI mientras tanto. */
+    /* Respaldo para un framework viejo que no exponga GetMenuUp (-1): si el pump
+       dejo de correr, el juego abrio su propia UI mientras tanto y el flanco que
+       vemos no es nuestro. */
     if(g_menuKit->GetMenuUp && g_menuKit->GetMenuUp() < 0
        && now > g_tickPrev && now - g_tickPrev > 250u) g_wasDown = 1;
     g_tickPrev = now;
 
-    g_press = down && HitTest(px, py);
+    if(down)
+    {
+        if(HitTest(px, py)) id = 1;
+    }
 
-    /* Flanco de bajada: un toque = una accion. */
-    if(g_press && !g_wasDown)
+    if(down && !g_wasDown && id)
     {
         /* Cualquier toque sobre nuestra UI reinicia el fundido. */
-        g_pressAt = now;
+        g_idleAt = now;
         LaunchSelector();
     }
+
+    g_press = id;
+    g_wasDown = down;
 }
 
 /* Corre en el hilo de proceso del juego cada frame, asi que se mantiene corto y
@@ -487,7 +521,9 @@ static void OnTick(void*)
     if(g_screenW <= 0.0f) return;   /* aun no se sabe cuanto mide la pantalla */
 
     /* El menu del juego manda: con un menu abierto no se procesa entrada ni se
-       pinta nada, para no dejar un boton encima de su UI. */
+       pinta nada, para no dejar un boton encima de su UI. HandleInput lleva la
+       misma puerta por su cuenta, para que siga siendo correcta aunque se
+       llame desde otro sitio. */
     if(g_menuKit->GetMenuUp && g_menuKit->GetMenuUp() == 1)
     {
         g_wasDown = 0;
@@ -499,7 +535,7 @@ static void OnTick(void*)
     LayoutLauncher();
     HandleInput(now);
     DrawLauncher(now);
-    DrawHint();
+    DrawHint(now);
 }
 
 ON_MOD_LOAD()
