@@ -41,6 +41,11 @@ MYMOD(net.psdk.samod.selectorlauncher, SA Selector Launcher, 1.0, Jean7z)
 /* Lanzador. Abajo a la DERECHA: abajo-izquierda esta el radar y estorba. El
    margen y el radio se calculan en tiempo real desde el tamano medido del
    render, nunca como constantes, porque cada dispositivo tiene el suyo. */
+/* Lanzador. Centrado en horizontal y PEGADO ABAJO. Abajo-izquierda esta el
+   radar y abajo-derecha los controles tactiles, asi que el centro-abajo es el
+   hueco que queda. El margen y el radio salen del tamano medido del render en
+   cada frame, nunca de una constante. */
+#define LAUNCH_MARGIN  28.0f    /* margen respecto al borde inferior */
 #define LAUNCH_R_MIN   34.0f    /* radio minimo, en pantallas pequenas */
 #define LAUNCH_R_MAX   40.0f    /* radio maximo, en pantallas grandes */
 #define LAUNCH_R_K     0.052f   /* radio = min(screenW,screenH) * esto, acotado */
@@ -308,17 +313,17 @@ static float LaunchRadius(void)
     return r;
 }
 
-/* Centro exacto de la pantalla. Se recalcula cada frame con el tamano medido por
-   la sonda, nunca con un valor fijo.
+/* Centro-abajo: centrado en horizontal, pegado al borde inferior con el margen.
+   Se recalcula cada frame con el tamano medido por la sonda, nunca con un valor
+   fijo, para que en otra pantalla el boton caiga en el mismo sitio relativo.
 
-   Choca a proposito con los menus de tienda del propio script, que tambien
-   aparecen en el centro; por eso el lanzador se va a alfa 0 pasado un rato sin
-   toques, y vuelve con el primero que haya en cualquier parte de la pantalla. */
+   Baja tambien saca el lanzador de encima de los menus de tienda del propio
+   script, que se abren en el centro. */
 static void LayoutLauncher(void)
 {
     g_launchR = LaunchRadius();
     g_launchX = g_screenW * 0.5f;
-    g_launchY = g_screenH * 0.5f;
+    g_launchY = g_screenH - LAUNCH_MARGIN - g_launchR;
 }
 
 /* Un rectangulo de toque alrededor del centro. Cuadrado y no circulo porque es
