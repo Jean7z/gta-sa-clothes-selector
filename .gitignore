@@ -1,0 +1,7 @@
+# Regenerable ndk-build output
+/obj/
+/libs/
+
+# Editor and Termux files
+*.swp
+*~
