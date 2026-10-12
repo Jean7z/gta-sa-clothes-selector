@@ -24,6 +24,7 @@
 // which resolves the mangled symbol through AML's GetSym (dlsym) -- no baked-in
 // address, so it is safe to use here.
 #include <aml-psdk/game_sa/entity/PlayerPed.h>
+#include <aml-psdk/game_sa/engine/RunningScript.h>
 
 #include <mod/selector_script.h>
 
@@ -46,27 +47,68 @@ static StartNewScript_t    g_pStartNewScript  = NULL;
 static const MenuKitAPI*   g_menuKit          = NULL;
 static void*               g_button           = NULL;
 
-/* The script registers itself with the game's script VM on start. Starting it a
- * second time from the same buffer would register a duplicate script, so the
- * launch is guarded to fire at most once per process. */
-static bool g_launched = false;
+/* CTheScripts::pActiveScripts -- the head of the game's list of live
+ * CRunningScript objects. psdk does not declare CTheScripts, so the symbol is
+ * resolved directly by name. It is a `CRunningScript*` global living in .bss,
+ * so this variable holds its ADDRESS; dereference to get the list head.
+ *
+ * Itanium mangled name: _ZN11CTheScripts14pActiveScriptsE  (14 == strlen("pActiveScripts")) */
+static CRunningScript**    g_ppActiveScripts  = NULL;
+
+/* Is our script currently live in the game's script VM?
+ *
+ * NOTE ON THE NAME: CRunningScript::m_szName (offset 0x10, Char[8]) is NOT a
+ * usable identity check here. StartNewScript hardcodes it to "noname":
+ *
+ *     mov  w9, #0x6f6e            ; 0x616e6f6e
+ *     mov  w8, #0x656d
+ *     str  w9, [x19, #0x10]       ; m_szName[0..3] = 'n','o','n','a'
+ *     strh w8, [x19, #0x14]       ; m_szName[4..5] = 'm','e'
+ *     strb wzr, [x19, #0x16]      ; m_szName[6]    = 0
+ *
+ * so the `03A4 SCRIPT_NAME "HAF"` in the bytecode never reaches the field.
+ *
+ * Instead, identify the script by its instruction pointer. StartNewScript does
+ *     str  x20, [x19, #0x20]      ; m_pCurrentIP = the buffer we passed in
+ * and the IP stays inside that buffer for the script's whole life, so any live
+ * CRunningScript whose m_pCurrentIP falls within SELECTOR_SCRIPT is ours. */
+static bool IsSelectorRunning()
+{
+    if(!g_ppActiveScripts)
+        return false;
+
+    const unsigned char* pBegin = SELECTOR_SCRIPT;
+    const unsigned char* pEnd   = SELECTOR_SCRIPT + SELECTOR_SCRIPT_LEN;
+
+    for(CRunningScript* script = *g_ppActiveScripts; script; script = script->m_pNext)
+    {
+        const unsigned char* ip = (const unsigned char*)script->m_pCurrentIP;
+        if(ip >= pBegin && ip < pEnd)
+            return true;
+    }
+
+    return false;
+}
 
 static void OnRelease(void*)
 {
-    if(g_launched)
-    {
-        // Already running. Starting it again would double-register the script.
-        return;
-    }
-
     if(!g_pStartNewScript)
     {
         logger->Error("CTheScripts::StartNewScript is unresolved; cannot start the selector script");
         return;
     }
 
+    /* StartNewScript registers the script in the game's script VM, so refuse to
+     * add a second copy while one is alive. Unlike a once-per-process flag this
+     * releases as soon as the script ends, which it does on its own the moment
+     * the player gets into a vehicle -- so the button stays re-runnable. */
+    if(IsSelectorRunning())
+    {
+        logger->Info("Selector script is already running; not starting a second copy");
+        return;
+    }
+
     g_pStartNewScript(SELECTOR_SCRIPT);
-    g_launched = true;
 
     logger->Info("Selector script started (CTheScripts::StartNewScript, %u bytes)", SELECTOR_SCRIPT_LEN);
 }
@@ -78,33 +120,31 @@ static bool IsInVehicle(void)
 }
 
 /* Runs on the game's processing thread every frame, so it stays short: one
- * rect query and one text draw. */
+ * short list walk and one text draw. */
 static void OnTick(void*)
 {
     if(!g_menuKit)
         return;
 
-    /* The script bails out immediately if the player is not driving, which
-     * looks like a dead button. Surface that requirement as a hint instead. */
-    static const char* msgHint    = "GET IN A VEHICLE FIRST";
-    static const char* msgRunning = "SELECTOR RUNNING";
-
+    /* The script checks whether the player is driving and stops as soon as they
+     * get into a vehicle, so driving is the state in which it CANNOT run. Show
+     * that requirement as a hint instead of letting the button look dead. */
     const char* msg;
     uint32_t    color;
-    if(g_launched)
+    if(IsSelectorRunning())
     {
-        msg   = msgRunning;
+        msg   = "SELECTOR RUNNING";
         color = 0x38BDF8FFu;
     }
     else if(IsInVehicle())
     {
-        msg   = "READY - PRESS SELECTOR";
-        color = 0x9BE36BFFu;
+        msg   = "STEP OUT OF VEHICLE TO RUN";
+        color = 0xF5A623FFu;
     }
     else
     {
-        msg   = msgHint;
-        color = 0xF5A623FFu;
+        msg   = "PRESS SELECTOR";
+        color = 0x9BE36BFFu;
     }
 
     /* Anchor the hint just under the button when its rect is known, otherwise
@@ -138,6 +178,23 @@ ON_MOD_LOAD()
     else
     {
         logger->Info("Resolved CTheScripts::StartNewScript");
+    }
+
+    /* Resolve the head of the live-script list. Without this the mod can start
+     * the script but cannot tell whether it is still running, and would happily
+     * register duplicate copies on every press. */
+    g_ppActiveScripts = (CRunningScript**)aml->GetSym(
+        aml->GetLib("libGTASA.so"),
+        "_ZN11CTheScripts14pActiveScriptsE"
+    );
+
+    if(!g_ppActiveScripts)
+    {
+        logger->Error("Failed to resolve _ZN11CTheScripts14pActiveScriptsE in libGTASA.so");
+    }
+    else
+    {
+        logger->Info("Resolved CTheScripts::pActiveScripts");
     }
 
     /* Menu Kit is compiled into this library; use the embedded entry point
