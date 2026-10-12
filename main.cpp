@@ -82,16 +82,29 @@ MYMOD(net.psdk.samod.selectorlauncher, SA Selector Launcher, 1.0, Jean7z)
 /* Tope de espera de la sonda antes de asumir un tamano. */
 #define PROBE_TIMEOUT 1500u
 
+/* El lanzador se esconde mientras el script corre: el menu del selector ya trae
+   su propio boton de regreso y tener los dos es redundante. Como eso deja al
+   boton invisible justo cuando no debe pulsar, hace falta red de seguridad.
+
+   Desatasco: si el script sigue en la lista mucho tiempo, no hay menu abierto y
+   el puntero lleva rato sin actividad, esta clarisimo que se ha quedado
+   colgado en la lista (un cierre de menu que no lo termina). Se le devuelve el
+   boton al usuario. NO salta en los primeros segundos tras lanzar, que es
+   cuando el arranque es lento yaria por las ramas. Es red, no el camino normal:
+   el cierre de verdad es el boton de regreso del propio script. */
+#define ZOMBIE_MS    20000.0f   /* cuanto lleva "corriendo" antes de sospechar */
+#define ZOMBIE_IDLE   5000.0f   /* y ademas, puntero sin actividad este rato */
+
 /* Colores en 0xRRGGBBAA (rojo en el byte alto, ALFA en el bajo). MenuKit
    desempaqueta asi en Canvas_Push, y es el mismo convenio para DrawCircle,
    DrawLine y DrawText. */
 #define L_BODY       0x0B0F1A66u  /* cuerpo: negro azulado translucido, alfa 0x66 */
 
-/* Los tres colores de estado son los MISMOS que los del texto de abajo, para
-   que el anillo insinue lo mismo que dice la frase. */
+/* Los dos colores de estado son los MISMOS que los del texto de abajo, para que
+   el anillo insinue lo mismo que dice la frase. Con el boton escondido mientras
+   el script corre no hace falta un tercero para ese caso. */
 #define C_READY      0x9BE36BFFu  /* a pie, sin lanzar */
 #define C_VEHICLE    0xF5A623FFu  /* conduciendo: el script no puede correr */
-#define C_RUNNING    0x38BDF8FFu  /* selector en marcha */
 #define L_PRESS      0xFFFFFFFFu  /* glifo pulsado: blanco, mas claro */
 
 typedef CRunningScript* (*StartNewScript_t)(const uint8_t*);
@@ -126,6 +139,24 @@ static float               g_pressK = 1.0f;
 /* Instante del ultimo toque SOBRE el lanzador. El reloj del fundido corre a
    partir de aqui. */
 static uint64_t            g_idleAt  = 0;
+
+/* Instante del ultimo arranque con exito. Lo usa el desatasco: no se sospecha de
+   un script que acaba de arrancar, porque el arranque es lento. 0 = nunca se ha
+   lanzado nada, y entonces el desatasco no puede dispararse. */
+static uint64_t            g_runSince = 0;
+
+/* Instante del ultimo toque en CUALQUIER parte, acierte o no. Tambien lo usa el
+   desatasco, para no declarar zombi a un script con el dedo encima. */
+static uint64_t            g_pokeAt  = 0;
+
+/* El lanzador estaba visible en el frame anterior. Al volver a verse se reinicia
+   el reloj del fundido, para que reaparezca con su opacidad completa y no a media
+   tinta. */
+static bool                g_wasVisible = false;
+
+/* El desatasco ya ha soltado su aviso por este arranque, para no escribir en el
+   log una vez por frame. */
+static bool                g_zombieLogged = false;
 
 /* Flanco del dedo: sin el estado ANTERIOR, un dedo que se queda apoyado sobre
    el icono lo pulsaria en cada frame. */
@@ -249,7 +280,47 @@ static void LaunchSelector(void)
      * del juego, para que el planificador no pueda ver el script con base NULL. */
     script->m_pBaseIP = (unsigned char*)SELECTOR_SCRIPT;
 
+    /* Se apunta cuando arranco para que el desatasco no lo declare zombi durante
+       el arranque lento, y se rearma el aviso por si habia saltado antes. */
+    g_runSince     = NowMs();
+    g_zombieLogged = false;
+
     logger->Info("Selector script started (CTheScripts::StartNewScript, %u bytes, base set)", SELECTOR_SCRIPT_LEN);
+}
+
+/* Desatasco. El lanzador se esconde mientras el script corre, y si ese script se
+   quedase clavado en la lista de CTheScripts el boton se quedaria escondido para
+   siempre: el usuario perderia la funcion hasta reiniciar el juego.
+
+   Se declara zombi SOLO si se cumple las tres cosas:
+     - que lleve mucho rato en la lista (y no acabado de arrancar),
+     - que no haya ningun menu del juego abierto (el selector ya se cerro),
+     - y que el puntero lleve un rato sin actividad.
+   El cierre de verdad es el boton de regreso del propio script; esto es solo la
+   red por si ese boton no lo termina. */
+static bool SelectorIsStuck(uint64_t now)
+{
+    if(!IsSelectorRunning()) return false;
+    if(g_runSince == 0)       return false;                    /* nunca lanzado */
+    if(now - g_runSince <= (uint64_t)ZOMBIE_MS) return false;  /* arranque lento */
+    if(g_menuKit->GetMenuUp && g_menuKit->GetMenuUp() != 0) return false;
+    if(g_pokeAt != 0 && now - g_pokeAt <= (uint64_t)ZOMBIE_IDLE) return false;
+
+    if(!g_zombieLogged)
+    {
+        logger->Info("Selector script still listed after %.0f s with no menu and no touch; "
+                     "treating as stuck and showing the launcher again",
+                     (double)(now - g_runSince) / 1000.0);
+        g_zombieLogged = true;
+    }
+    return true;
+}
+
+/* Hay que pintar el lanzador? Mientras el selector corre no: su menu ya trae
+   boton de regreso y dos lanzadores a la vez sobran. */
+static bool SelectorVisible(uint64_t now)
+{
+    return !IsSelectorRunning() || SelectorIsStuck(now);
 }
 
 /* Devuelve true si el jugador esta conduciendo. */
@@ -337,12 +408,14 @@ static bool HitTest(float px, float py)
            py >= g_launchY - r && py <= g_launchY + r;
 }
 
-/* Color de estado. Son los mismos tres que usan las frases de abajo, para que el
-   anillo insinue lo mismo que dice el texto. */
+/* Color de estado. Son los mismos dos que usan las frases de abajo, para que el
+   anillo insinue lo mismo que dice el texto.
+
+   No hay color "corriendo" porque con el script en marcha el lanzador esta
+   escondido y no se dibuja nada. */
 static unsigned int StateColor(void)
 {
-    if(IsSelectorRunning()) return C_RUNNING;
-    if(IsInVehicle())      return C_VEHICLE;
+    if(IsInVehicle()) return C_VEHICLE;
     return C_READY;
 }
 
@@ -427,13 +500,11 @@ static void DrawHint(uint64_t now)
 
     /* El script comprueba si el jugador conducia y PARA en cuanto se mete en un
        vehiculo, asi que conducir es justo el estado en el que NO puede correr.
-       Se enseña ese requisito como pista para que el boton no parezca muerto. */
-    if(IsSelectorRunning())
-    {
-        msg   = "SELECTOR RUNNING";
-        color = C_RUNNING;
-    }
-    else if(IsInVehicle())
+       Se enseña ese requisito como pista para que el boton no parezca muerto.
+
+       Solo dos estados: con el script en marcha el lanzador esta escondido y no
+       hay nada que señalar, asi que "SELECTOR RUNNING" sobra. */
+    if(IsInVehicle())
     {
         msg   = "STEP OUT OF VEHICLE TO RUN";
         color = C_VEHICLE;
@@ -465,8 +536,12 @@ static void DrawHint(uint64_t now)
    El hit-test NO mira el alfa: el icono atenuado se toca igual que el brillante.
    Un toque abre siempre, este o no apagado, porque pedir dos golpes para lo
    mismo es engorroso. El apagado es estetica, no una puerta. Y como el piso es
-   0.38 y no 0, nunca hay un boton invisible al que no se pueda llegar. */
-static void HandleInput(uint64_t now)
+   0.38 y no 0, nunca hay un boton invisible al que no se pueda llegar.
+
+   Lo que SI mira es la visibilidad: con el script en marcha el lanzador esta
+   escondido y no se hace hit-test, que si no se volveria a pulsar un boton que
+   no esta en pantalla. */
+static void HandleInput(uint64_t now, bool visible)
 {
     float px = 0.0f, py = 0.0f;
     int down = 0, id = 0;
@@ -496,7 +571,16 @@ static void HandleInput(uint64_t now)
        && now > g_tickPrev && now - g_tickPrev > 250u) g_wasDown = 1;
     g_tickPrev = now;
 
-    if(down)
+    if(down && !g_wasDown)
+    {
+        /* Actividad real del puntero, acierte o no. El desatasco lo mira para no
+           declarar zombi a un script con el dedo encima. */
+        g_pokeAt = now;
+    }
+
+    /* Con el lanzador escondido no hay nada que tocar: se salta el hit-test,
+       pero el puntero se sigue leyendo arriba para el desatasco. */
+    if(down && visible)
     {
         if(HitTest(px, py)) id = 1;
     }
@@ -517,6 +601,7 @@ static void HandleInput(uint64_t now)
 static void OnTick(void*)
 {
     uint64_t now;
+    bool visible;
     if(!g_menuKit)
         return;
 
@@ -537,10 +622,27 @@ static void OnTick(void*)
         return;
     }
 
+    /* Con el selector corriendo el lanzador se esconde: su menu ya trae boton de
+       regreso. El desatasco puede devolverlo si el script se queda colgado. */
+    visible = SelectorVisible(now);
+
     LayoutLauncher();
-    HandleInput(now);
-    DrawLauncher(now);
-    DrawHint(now);
+    HandleInput(now, visible);
+
+    /* Al volver a verse, el reloj del fundido se rearma: si no, el icono
+       reapareceria a media tinta justo cuando el usuario lo está buscando. */
+    if(visible && !g_wasVisible)
+    {
+        g_idleAt = now;
+        g_press  = false;
+    }
+    g_wasVisible = visible;
+
+    if(visible)
+    {
+        DrawLauncher(now);
+        DrawHint(now);
+    }
 }
 
 ON_MOD_LOAD()
