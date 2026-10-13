@@ -23,7 +23,8 @@ folder.
 
 ## Install
 
-Copy `libAML_PSDK_SelectorLauncher.so` into your AML mods folder:
+Download [`libAML_PSDK_SelectorLauncher.so`](https://github.com/Jean7z/gta-sa-clothes-selector/releases/latest)
+from the releases page and copy it into your AML mods folder:
 
 ```
 Android/data/com.rockstargames.gtasa/mods/
@@ -32,9 +33,6 @@ Android/data/com.rockstargames.gtasa/mods/
 Launch the game and the tab appears at the top of the screen.
 
 To remove it, delete the file.
-
-There are no prebuilt releases yet. If you do not already build Android mods,
-[the build instructions are below](#build).
 
 ## For developers
 
