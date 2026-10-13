@@ -1,4 +1,4 @@
-# Clothing Selector for GTA:SA Android
+# Clothes Selector for GTA:SA Android
 
 A small tab at the top of the screen that opens a clothes picker in GTA: San
 Andreas for Android.
