@@ -7,8 +7,19 @@ Andreas for Android.
 
 ## What it does
 
-You get a wardrobe. Tap the tab, pick a category, browse the items and try them
-on before you buy.
+You get a wardrobe.
+
+A small tab with a clothes hanger on it sits at the **top of the screen**. Tap
+it and a clothes picker opens — pick a category, browse the items, and try them
+on your character before you buy.
+
+Two things the tab does so it stays out of your way:
+
+- **It disappears while you browse.** The picker has its own navigation, so the
+  tab steps aside instead of sitting on top of it. It comes back when you close
+  the picker.
+- **It turns amber when you get in a car.** The picker cannot run while you are
+  driving, so the colour tells you to step out. It is green when you are ready.
 
 It works without installing CLEO or any other script loader — the mod is a
 single `.so` file that drops into your mods folder.
