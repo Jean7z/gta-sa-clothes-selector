@@ -1,0 +1,64 @@
+name: Android arm64 build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository and PSDK submodule
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Set up Java
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install Android NDK r29
+        run: sdkmanager 'ndk;29.0.14206865'
+
+      - name: Build arm64-v8a library
+        run: "$ANDROID_HOME/ndk/29.0.14206865/ndk-build"
+
+      - name: Verify build output
+        run: test -s libs/arm64-v8a/libAML_PSDK_SelectorLauncher.so
+
+      # The embedded script must stay byte-identical to the .csi it came from.
+      # A drift here means someone edited the generated header by hand.
+      - name: Verify the embedded script is intact
+        run: |
+          node -e '
+            const fs = require("fs");
+            const src = fs.readFileSync("mod/selector_script.h", "utf8");
+            const open = src.indexOf("SELECTOR_SCRIPT[]");
+            const body = src.slice(src.indexOf("{", open) + 1, src.indexOf("}", open));
+            const bytes = body.match(/0x[0-9a-fA-F]{2}/g).map(h => parseInt(h, 16));
+            const h = require("crypto").createHash("sha256")
+              .update(Buffer.from(bytes)).digest("hex");
+            const want = "9f59703dfc21eda6391eacc11a1a34f398ddce2cd567e392e4ea8719b881a765";
+            if (h !== want) {
+              console.error("embedded script sha256 mismatch: got " + h + " want " + want);
+              process.exit(1);
+            }
+            console.log("embedded script ok, " + bytes.length + " bytes");
+          '
+
+      - name: Attach the library to the release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: libs/arm64-v8a/libAML_PSDK_SelectorLauncher.so
